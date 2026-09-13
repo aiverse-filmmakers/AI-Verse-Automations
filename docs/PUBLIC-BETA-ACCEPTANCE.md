@@ -29,4 +29,16 @@ Current local implementation evidence covers:
 25. legacy OS automation definition detection as migration-required;
 26. cross-platform GitHub Actions matrix for Linux/macOS/Windows, Python 3.11-3.13.
 
-The canonical GitHub repository and live GitHub Actions run are still required before this evidence can be promoted into AI-Verse-System as CURRENT release evidence.
+## Hosted evidence
+
+Canonical repository: `aiverse-filmmakers/AI-Verse-Automations`.
+
+Publication preserved the exact locally tested source tree before this evidence-only documentation update:
+
+- local implementation commit: `f38f525769c9ad976e5dd016f8d577fa8a4e8035`;
+- locally tested source tree: `0749fdb4259b1d7e28715eb8e367f1642d43db4e`;
+- local test suite: **27/27 passed**;
+- canonical GitHub publication commit containing that exact tree: `447310570aba837c1df61b9f87013f7cb7ec062b`;
+- GitHub Actions CI run **34777167602**: **9/9 matrix jobs passed** across Ubuntu, macOS and Windows on Python 3.11, 3.12 and 3.13.
+
+This document update records that completed hosted evidence. It does not claim an immutable tagged public release; release tagging/version pinning remains a separate distribution step.
