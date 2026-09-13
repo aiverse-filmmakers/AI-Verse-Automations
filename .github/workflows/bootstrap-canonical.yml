@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/bootstrap-canonical.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".bootstrap/run.txt"
 
 permissions:
   contents: write
@@ -15,6 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Reconstruct and verify tested bundle
