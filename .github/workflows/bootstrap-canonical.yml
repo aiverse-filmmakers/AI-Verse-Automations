@@ -26,7 +26,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .bootstrap/bundlepart-*.txt > /tmp/automations.bundle.b64
+          cat \
+            .bootstrap/fix00-0.txt \
+            .bootstrap/fix00-1.txt \
+            .bootstrap/fix00-2.txt \
+            .bootstrap/fix00-3.txt \
+            .bootstrap/bundlepart-01.txt \
+            .bootstrap/bundlepart-02.txt \
+            .bootstrap/bundlepart-03.txt \
+            .bootstrap/bundlepart-04.txt \
+            .bootstrap/bundlepart-05.txt \
+            .bootstrap/bundlepart-06.txt \
+            .bootstrap/fix07-0.txt \
+            .bootstrap/fix07-1.txt \
+            .bootstrap/fix07-2.txt \
+            .bootstrap/fix07-3.txt \
+            > /tmp/automations.bundle.b64
           test "$(wc -c < /tmp/automations.bundle.b64)" -eq 62392
           base64 --decode /tmp/automations.bundle.b64 > /tmp/automations.bundle
           test "$(wc -c < /tmp/automations.bundle)" -eq 46793
