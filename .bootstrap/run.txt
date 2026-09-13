@@ -1,3 +1,4 @@
 publish exact tested canonical tree
 retry: verified fragments
 retry: refreshed index
+retry: protected workflow split
