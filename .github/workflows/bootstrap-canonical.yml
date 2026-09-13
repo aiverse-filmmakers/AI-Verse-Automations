@@ -1,0 +1,45 @@
+name: Publish canonical Automations tree
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/bootstrap-canonical.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify tested bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/bundlepart-*.txt > /tmp/automations.bundle.b64
+          test "$(wc -c < /tmp/automations.bundle.b64)" -eq 62392
+          base64 --decode /tmp/automations.bundle.b64 > /tmp/automations.bundle
+          test "$(wc -c < /tmp/automations.bundle)" -eq 46793
+          git bundle verify /tmp/automations.bundle
+          rm -rf /tmp/automations-src
+          git clone --branch main /tmp/automations.bundle /tmp/automations-src
+          test "$(git -C /tmp/automations-src rev-parse HEAD)" = "f38f525769c9ad976e5dd016f8d577fa8a4e8035"
+          test "$(git -C /tmp/automations-src rev-parse HEAD^{tree})" = "0749fdb4259b1d7e28715eb8e367f1642d43db4e"
+
+      - name: Replace bootstrap tree with exact tested source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          tar -C /tmp/automations-src --exclude=.git -cf - . | tar -xf -
+          test "$(git write-tree)" = "0749fdb4259b1d7e28715eb8e367f1642d43db4e"
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: publish canonical AI-Verse Automations runtime"
+          git push origin HEAD:main
