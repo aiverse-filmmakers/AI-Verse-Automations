@@ -1,1 +1,2 @@
 publish exact tested canonical tree
+retry: verified fragments
