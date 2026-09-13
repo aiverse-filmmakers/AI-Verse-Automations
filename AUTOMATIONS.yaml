@@ -1,0 +1,35 @@
+schema_version: "1.0"
+component_id: ai-verse-automations
+version: "0.1.0"
+role: canonical scheduler/trigger/runtime owner
+public_beta_scope: local-single-user
+owns:
+  - scheduled jobs
+  - cron/time triggers
+  - event/webhook trigger normalization
+  - recurring wake definitions
+  - trigger/job lifecycle
+  - retry/backoff/dead-letter policy
+  - restart/recovery metadata
+  - wake invocation receipts
+does_not_own:
+  - strategic goals
+  - memory
+  - skills
+  - bot tasks
+  - external credentials
+  - canonical business data
+  - gateway session/run state
+lifecycle:
+  - install
+  - setup
+  - status
+  - doctor
+  - enable
+  - disable
+  - update
+  - uninstall
+machine_readable:
+  json: true
+uninstall_preserves_canonical_state: true
+authority_transfer_separate: true
