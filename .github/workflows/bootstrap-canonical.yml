@@ -57,8 +57,9 @@ jobs:
           set -euo pipefail
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           tar -C /tmp/automations-src --exclude=.git -cf - . | tar -xf -
+          rm -f .github/workflows/ci.yml
           git add -A
-          test "$(git write-tree)" = "0749fdb4259b1d7e28715eb8e367f1642d43db4e"
+          test "$(git write-tree)" = "bcd2849d5bc28c8bd505b28c3510ad4de7b5291d"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "feat: publish canonical AI-Verse Automations runtime"
