@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import sqlite3
 import re
@@ -96,6 +97,154 @@ class Store:
         finally:
             conn.close()
         return self.get_automation(automation_id)
+
+    def create_definition(
+        self,
+        *,
+        name: str,
+        scope: str,
+        target_kind: str,
+        target_ref: str | None,
+        action_class: str,
+        wake: dict[str, Any],
+        trigger_kind: str,
+        trigger_spec: dict[str, Any],
+        idempotency_key: str,
+        retry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically create one Automation and its trigger.
+
+        The trusted caller supplies one stable idempotency key. The owner derives
+        both durable identities from it, so an exact retry returns the existing
+        definition while semantic drift under the same key fails closed.
+        """
+        key = _id(idempotency_key, "idempotency key")
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        automation_id = f"aut_{digest[:40]}"
+        trigger_id = f"trg_{digest[:40]}"
+
+        if target_kind not in {"brain", "bot", "team_run", "gateway"}:
+            raise ValidationError("target_kind must be brain, bot, team_run or gateway")
+        if scope != "operator":
+            if not scope.startswith("workspace:") or not WORKSPACE_RE.fullmatch(scope.split(":",1)[1]):
+                raise ValidationError("scope must be operator or workspace:<valid-id>")
+        if target_kind in {"bot","team_run"} and scope=="operator":
+            raise ValidationError("Bot and Team Run automation targets require workspace scope")
+        if target_kind in {"bot","team_run"}:
+            if not isinstance(target_ref,str) or not target_ref.strip() or len(target_ref)>256:
+                raise ValidationError("Bot and Team Run automation targets require bounded target_ref")
+        elif target_ref is not None and (not isinstance(target_ref,str) or not target_ref.strip() or len(target_ref)>256):
+            raise ValidationError("target_ref must be a bounded non-empty string")
+        if action_class not in ACTION_CLASSES:
+            raise ValidationError("unknown OS action_class")
+        if not isinstance(name,str) or not name.strip() or len(name.strip())>512:
+            raise ValidationError("name must be a non-empty string up to 512 characters")
+        if not isinstance(wake,dict):
+            raise ValidationError("wake must be a JSON object")
+        if not isinstance(trigger_spec,dict):
+            raise ValidationError("trigger spec must be an object")
+        validate_trigger_spec(trigger_kind, trigger_spec)
+
+        wake_json = bounded_json(wake, max_bytes=WAKE_LIMIT, label="wake")
+        retry_json = bounded_json(_retry_policy(retry), max_bytes=4096, label="retry")
+        spec_json = bounded_json(trigger_spec, max_bytes=16384, label="trigger spec")
+        next_run = first_run_at(trigger_kind, trigger_spec)
+        normalized_name = name.strip()
+        normalized_target_ref = target_ref.strip() if isinstance(target_ref, str) else None
+        now = utc_now()
+
+        conn = connect(self.state_dir)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_automation = conn.execute(
+                "SELECT * FROM automations WHERE id=?",
+                (automation_id,),
+            ).fetchone()
+            existing_trigger = conn.execute(
+                "SELECT * FROM triggers WHERE id=?",
+                (trigger_id,),
+            ).fetchone()
+
+            if existing_automation or existing_trigger:
+                if not existing_automation or not existing_trigger:
+                    conn.execute("ROLLBACK")
+                    raise StateConflict(
+                        "atomic automation definition is incomplete under the supplied idempotency key"
+                    )
+                automation_exact = (
+                    existing_automation["name"] == normalized_name
+                    and existing_automation["scope"] == scope
+                    and existing_automation["target_kind"] == target_kind
+                    and existing_automation["target_ref"] == normalized_target_ref
+                    and existing_automation["action_class"] == action_class
+                    and existing_automation["wake_json"] == wake_json
+                    and existing_automation["retry_json"] == retry_json
+                    and existing_automation["state"] == "active"
+                )
+                trigger_exact = (
+                    existing_trigger["automation_id"] == automation_id
+                    and existing_trigger["kind"] == trigger_kind
+                    and existing_trigger["spec_json"] == spec_json
+                    and existing_trigger["state"] == "active"
+                )
+                if not automation_exact or not trigger_exact:
+                    conn.execute("ROLLBACK")
+                    raise StateConflict(
+                        "idempotency key already owns a different Automation definition"
+                    )
+                conn.execute("COMMIT")
+                return {
+                    "state": "existing",
+                    "idempotency_key_digest": f"sha256:{digest}",
+                    "automation": self.get_automation(automation_id),
+                    "trigger": self.get_trigger(trigger_id),
+                }
+
+            conn.execute(
+                "INSERT INTO automations(id,name,scope,target_kind,target_ref,action_class,wake_json,retry_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    automation_id,
+                    normalized_name,
+                    scope,
+                    target_kind,
+                    normalized_target_ref,
+                    action_class,
+                    wake_json,
+                    retry_json,
+                    "active",
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO triggers(id,automation_id,kind,spec_json,state,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    trigger_id,
+                    automation_id,
+                    trigger_kind,
+                    spec_json,
+                    "active",
+                    next_run,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+        return {
+            "state": "created",
+            "idempotency_key_digest": f"sha256:{digest}",
+            "automation": self.get_automation(automation_id),
+            "trigger": self.get_trigger(trigger_id),
+        }
 
     def get_automation(self, automation_id: str) -> dict[str, Any]:
         conn = connect(self.state_dir)
