@@ -225,12 +225,15 @@ def _entry(existing: Any, state_dir: Path) -> dict[str, Any]:
             raise OsExtensionError("existing Automations extension entry is not owned by this component")
     else:
         raise OsExtensionError("existing Automations extension entry is invalid")
+    enabled = current.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise OsExtensionError("existing Automations extension enabled state is invalid")
     return {
         **current,
         "id": EXTENSION_ID,
         "supported": True,
         "installed": True,
-        "enabled": True,
+        "enabled": enabled,
         "version": __version__,
         "source": EXTENSION_SOURCE,
         "instructions": EXTENSION_INSTRUCTIONS,
