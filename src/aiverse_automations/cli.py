@@ -10,6 +10,7 @@ from .config import default_state_dir, load_config, save_config, validate_target
 from .engine import Engine
 from .errors import AutomationsError
 from .lifecycle import descriptor, doctor, set_enabled, setup, uninstall, update
+from .os_extension import install_os_extension
 from .service import serve
 from .store import Store
 
@@ -26,6 +27,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("install")
     s=sub.add_parser("setup"); s.add_argument("--os-root"); s.add_argument("--disabled",action="store_true")
     sub.add_parser("status"); sub.add_parser("doctor"); sub.add_parser("enable"); sub.add_parser("disable"); sub.add_parser("update"); sub.add_parser("uninstall")
+    attach=sub.add_parser("attach-os"); attach.add_argument("--os-root")
     cfg=sub.add_parser("configure-target"); cfg.add_argument("kind",choices=["brain","bot","team_run","gateway"]); cfg.add_argument("config",type=_json_arg)
     c=sub.add_parser("create"); c.add_argument("--id"); c.add_argument("--name",required=True); c.add_argument("--scope",default="operator"); c.add_argument("--target-kind",required=True,choices=["brain","bot","team_run","gateway"]); c.add_argument("--target-ref"); c.add_argument("--action-class",default="read_local"); c.add_argument("--wake",required=True,type=_json_arg); c.add_argument("--retry",type=_json_arg)
     cd=sub.add_parser("create-definition"); cd.add_argument("--definition",required=True,type=_json_arg)
@@ -78,6 +80,12 @@ def main(argv=None) -> int:
         elif cmd=="disable": result=set_enabled(state_dir,False)
         elif cmd=="update": result=update(state_dir)
         elif cmd=="uninstall": result=uninstall(state_dir)
+        elif cmd=="attach-os":
+            cfg=load_config(state_dir,required=True)
+            root=args.os_root or cfg.get("os_root")
+            if not isinstance(root,str) or not root:
+                raise AutomationsError("attach-os requires a configured or explicit OS root")
+            result=install_os_extension(state_dir,Path(root).expanduser().resolve())
         elif cmd=="configure-target":
             cfg=load_config(state_dir,required=True); target_config=validate_target_config(args.kind,args.config); cfg.setdefault("targets",{})[args.kind]=target_config; save_config(state_dir,cfg); result={"ok":True,"kind":args.kind,"config":target_config}
         elif cmd=="create": result=store.create_automation(name=args.name,scope=args.scope,target_kind=args.target_kind,target_ref=args.target_ref,action_class=args.action_class,wake=args.wake,retry=args.retry,automation_id=args.id)
