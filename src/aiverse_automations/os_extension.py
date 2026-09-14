@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from . import __version__
 from .config import load_config
+from .errors import AutomationsError
 
 EXTENSION_ID = "ai-verse-automations"
 EXTENSION_SOURCE = "AI-Verse-Automations"
@@ -21,7 +22,7 @@ REGISTRY_SCHEMA = "1.0"
 MAX_REGISTRY_BYTES = 1024 * 1024
 
 
-class OsExtensionError(RuntimeError):
+class OsExtensionError(AutomationsError):
     pass
 
 
@@ -268,10 +269,12 @@ def install_os_extension(state_dir: Path, os_root: Path) -> dict[str, Any]:
     lock = _relative_path(os_root, REGISTRY_LOCK_PATH)
     _assert_no_symlink_chain(os_root, REGISTRY_LOCK_PATH, include_leaf=True)
     fd: int | None = None
+    acquired = False
     created: list[str] = []
     try:
         try:
             fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            acquired = True
             os.write(fd, json.dumps({
                 "extension_id": EXTENSION_ID,
                 "created_at": __import__("datetime").datetime.now(
@@ -328,7 +331,8 @@ def install_os_extension(state_dir: Path, os_root: Path) -> dict[str, Any]:
     finally:
         if fd is not None:
             os.close(fd)
-        try:
-            lock.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if acquired:
+            try:
+                lock.unlink(missing_ok=True)
+            except Exception:
+                pass
