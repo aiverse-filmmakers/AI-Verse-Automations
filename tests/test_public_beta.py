@@ -182,3 +182,99 @@ def test_invalid_scope_payload_and_target_contracts_fail_early(state_dir):
         store.create_automation(name="bot",scope="operator",target_kind="bot",target_ref="bot1",action_class="read_local",wake={"objective":"x"})
     with pytest.raises(ValidationError):
         store.create_automation(name="badwake",scope="operator",target_kind="gateway",target_ref=None,action_class="read_local",wake=[1,2,3])  # type: ignore[arg-type]
+
+
+def test_atomic_definition_create_replay_and_drift_rejection(state_dir):
+    store=Store(state_dir)
+    definition={
+        "name":"Monday delivery review",
+        "scope":"workspace:demo",
+        "target_kind":"gateway",
+        "target_ref":None,
+        "action_class":"read_local",
+        "wake":{"objective":"Review the weekly delivery checklist."},
+        "trigger_kind":"cron",
+        "trigger_spec":{"expr":"0 9 * * MON","timezone":"Europe/Bucharest"},
+        "idempotency_key":"gateway:run-1:call-1:automation",
+    }
+    created=store.create_definition(**definition)
+    assert created["state"]=="created"
+    assert created["automation"]["scope"]=="workspace:demo"
+    assert created["trigger"]["kind"]=="cron"
+
+    replay=store.create_definition(**definition)
+    assert replay["state"]=="existing"
+    assert replay["automation"]["id"]==created["automation"]["id"]
+    assert replay["trigger"]["id"]==created["trigger"]["id"]
+    assert len(store.list_automations())==1
+
+    with pytest.raises(StateConflict,match="different Automation definition"):
+        store.create_definition(**{**definition,"name":"Changed meaning under same key"})
+    assert len(store.list_automations())==1
+
+
+def test_atomic_definition_validation_failure_leaves_no_partial_automation(state_dir):
+    store=Store(state_dir)
+    with pytest.raises(ValidationError):
+        store.create_definition(
+            name="Invalid trigger",
+            scope="workspace:demo",
+            target_kind="gateway",
+            target_ref=None,
+            action_class="read_local",
+            wake={"objective":"Never persist partially."},
+            trigger_kind="cron",
+            trigger_spec={"expr":"not a cron","timezone":"Europe/Bucharest"},
+            idempotency_key="gateway:invalid-definition",
+        )
+    assert store.list_automations()==[]
+    from aiverse_automations.db import connect
+    conn=connect(state_dir)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM triggers").fetchone()[0]==0
+    finally:
+        conn.close()
+
+
+def test_atomic_definition_transaction_rolls_back_if_trigger_insert_fails(state_dir, monkeypatch):
+    store=Store(state_dir)
+    from aiverse_automations import store as store_module
+    original_connect=store_module.connect
+
+    class FaultyConnection:
+        def __init__(self, inner):
+            self.inner=inner
+        def execute(self, sql, params=()):
+            if sql.startswith("INSERT INTO triggers"):
+                raise RuntimeError("fixture trigger insert failure")
+            return self.inner.execute(sql, params)
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    calls={"count":0}
+    def faulty_connect(path):
+        calls["count"]+=1
+        inner=original_connect(path)
+        return FaultyConnection(inner) if calls["count"]==1 else inner
+
+    monkeypatch.setattr(store_module,"connect",faulty_connect)
+    with pytest.raises(RuntimeError,match="fixture trigger insert failure"):
+        store.create_definition(
+            name="Rollback proof",
+            scope="operator",
+            target_kind="gateway",
+            target_ref=None,
+            action_class="read_local",
+            wake={"objective":"Rollback atomically."},
+            trigger_kind="interval",
+            trigger_spec={"seconds":60},
+            idempotency_key="gateway:rollback-proof",
+        )
+
+    monkeypatch.setattr(store_module,"connect",original_connect)
+    assert store.list_automations()==[]
+    conn=original_connect(state_dir)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM triggers").fetchone()[0]==0
+    finally:
+        conn.close()

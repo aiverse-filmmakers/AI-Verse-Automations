@@ -28,6 +28,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("status"); sub.add_parser("doctor"); sub.add_parser("enable"); sub.add_parser("disable"); sub.add_parser("update"); sub.add_parser("uninstall")
     cfg=sub.add_parser("configure-target"); cfg.add_argument("kind",choices=["brain","bot","team_run","gateway"]); cfg.add_argument("config",type=_json_arg)
     c=sub.add_parser("create"); c.add_argument("--id"); c.add_argument("--name",required=True); c.add_argument("--scope",default="operator"); c.add_argument("--target-kind",required=True,choices=["brain","bot","team_run","gateway"]); c.add_argument("--target-ref"); c.add_argument("--action-class",default="read_local"); c.add_argument("--wake",required=True,type=_json_arg); c.add_argument("--retry",type=_json_arg)
+    cd=sub.add_parser("create-definition"); cd.add_argument("--definition",required=True,type=_json_arg)
     t=sub.add_parser("add-trigger"); t.add_argument("automation_id"); t.add_argument("--id"); t.add_argument("--kind",required=True,choices=["once","interval","cron","webhook","event"]); t.add_argument("--spec",required=True,type=_json_arg)
     ew=sub.add_parser("edit-wake"); ew.add_argument("automation_id"); ew.add_argument("--wake",required=True,type=_json_arg)
     et=sub.add_parser("edit-trigger"); et.add_argument("trigger_id"); et.add_argument("--spec",required=True,type=_json_arg)
@@ -80,6 +81,31 @@ def main(argv=None) -> int:
         elif cmd=="configure-target":
             cfg=load_config(state_dir,required=True); target_config=validate_target_config(args.kind,args.config); cfg.setdefault("targets",{})[args.kind]=target_config; save_config(state_dir,cfg); result={"ok":True,"kind":args.kind,"config":target_config}
         elif cmd=="create": result=store.create_automation(name=args.name,scope=args.scope,target_kind=args.target_kind,target_ref=args.target_ref,action_class=args.action_class,wake=args.wake,retry=args.retry,automation_id=args.id)
+        elif cmd=="create-definition":
+            d=args.definition
+            if not isinstance(d,dict):
+                raise AutomationsError("definition must be a JSON object")
+            allowed={"name","scope","target_kind","target_ref","action_class","wake","retry","trigger","idempotency_key"}
+            unknown=set(d)-allowed
+            required={"name","scope","target_kind","action_class","wake","trigger","idempotency_key"}
+            missing=required-set(d)
+            if unknown or missing:
+                raise AutomationsError("definition fields are invalid: "+", ".join(sorted(unknown|missing)))
+            trigger=d.get("trigger")
+            if not isinstance(trigger,dict) or set(trigger)!={"kind","spec"}:
+                raise AutomationsError("definition trigger must contain exactly kind and spec")
+            result=store.create_definition(
+                name=d["name"],
+                scope=d["scope"],
+                target_kind=d["target_kind"],
+                target_ref=d.get("target_ref"),
+                action_class=d["action_class"],
+                wake=d["wake"],
+                retry=d.get("retry"),
+                trigger_kind=trigger["kind"],
+                trigger_spec=trigger["spec"],
+                idempotency_key=d["idempotency_key"],
+            )
         elif cmd=="add-trigger": result=store.create_trigger(automation_id=args.automation_id,kind=args.kind,spec=args.spec,trigger_id=args.id)
         elif cmd=="edit-wake": result=store.update_automation_wake(args.automation_id,args.wake)
         elif cmd=="edit-trigger": result=store.update_trigger(args.trigger_id,args.spec)
