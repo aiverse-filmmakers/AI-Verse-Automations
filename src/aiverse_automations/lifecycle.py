@@ -46,11 +46,26 @@ def legacy_definition_paths(os_root: str | None) -> list[str]:
     return sorted(set(candidates))
 
 
+def migration_authority(state_dir: Path, *, config: dict | None = None) -> dict:
+    config=config or load_config(state_dir,required=False)
+    configured=sorted(set(config.get("migration_sources") or []))
+    discovered=legacy_definition_paths(config.get("os_root"))
+    sources=sorted(set(configured+discovered))
+    required=bool(config.get("migration_required") or sources)
+    return {
+      "required":required,
+      "configured":configured,
+      "discovered":discovered,
+      "sources":sources,
+    }
+
+
 def descriptor(state_dir: Path) -> dict:
     config=load_config(state_dir,required=False)
     exists=config_path(state_dir).exists(); database=db_path(state_dir).exists()
-    migration_sources=list(config.get("migration_sources") or [])
-    migration_required=bool(config.get("migration_required") or migration_sources)
+    migration=migration_authority(state_dir,config=config)
+    migration_sources=migration["sources"]
+    migration_required=migration["required"]
     db_ok=False
     if database:
         db_ok,_=integrity_check(state_dir)
@@ -75,6 +90,7 @@ def descriptor(state_dir: Path) -> dict:
       "requested_capabilities":["schedule","event_ingress","owner_wake_delivery"],
       "authority_transfer_separate":True,"uninstall_preserves_canonical_state":True,
       "migration_required":migration_required,"migration_sources":migration_sources,
+      "migration_sources_configured":migration["configured"],"migration_sources_discovered":migration["discovered"],
       "health":{"database":db_ok,"os_permission_boundary":dependency_ok},
       "state_dir":str(state_dir),"database":str(db_path(state_dir)),"enabled":bool(config.get("enabled")),"os_root":config.get("os_root")
     }
@@ -105,8 +121,12 @@ def setup(state_dir: Path, *, os_root: str | None = None, enable: bool = True) -
 
 def set_enabled(state_dir: Path, enabled: bool) -> dict:
     config=load_config(state_dir,required=True)
-    if enabled and config.get("migration_required"):
-        raise ValidationError("cannot enable while legacy OS automation definitions require migration")
+    migration=migration_authority(state_dir,config=config)
+    if enabled and migration["required"]:
+        raise ValidationError(
+            "cannot enable while legacy OS automation definitions require migration: "
+            + ", ".join(migration["sources"])
+        )
     config["enabled"]=enabled; config["uninstalled"]=False; save_config(state_dir,config); return descriptor(state_dir)
 
 
@@ -141,9 +161,7 @@ def doctor(state_dir: Path) -> dict:
     os_root=config.get("os_root")
     permission=_permission_boundary(os_root)
     checks.append({"depth":"dependency","name":"os-permission-boundary","ok":_os_dependency_ok(os_root),"detail":str(permission) if permission else "os_root not configured"})
-    live_legacy=legacy_definition_paths(os_root)
-    expected=list(config.get("migration_sources") or [])
-    migration=bool(config.get("migration_required") or live_legacy or expected)
-    checks.append({"depth":"attachment/discovery","name":"legacy-definition-handoff","ok":not migration,"detail":{"configured":expected,"discovered":live_legacy}})
+    migration=migration_authority(state_dir,config=config)
+    checks.append({"depth":"attachment/discovery","name":"legacy-definition-handoff","ok":not migration["required"],"detail":{"configured":migration["configured"],"discovered":migration["discovered"]}})
     critical={"config","sqlite-integrity","os-permission-boundary","legacy-definition-handoff"}
     return {"component_id":COMPONENT_ID,"version":__version__,"checked_depths":["structural","attachment/discovery","runtime","dependency","operational"],"ok":all(c["ok"] for c in checks if c["name"] in critical),"checks":checks,"state":descriptor(state_dir)["state"]}
