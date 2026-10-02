@@ -13,6 +13,7 @@ from .authority import os_permission
 from .config import load_config
 from .db import connect
 from .errors import AuthorizationError, DeliveryError, StateConflict, ValidationError
+from .lifecycle import migration_authority
 from .schedule import advance_after_fire
 from .util import bounded_json, canonical_json, iso, parse_time, sha256_json, utc_now
 
@@ -37,7 +38,20 @@ class Engine:
     def _config(self) -> dict[str, Any]:
         return load_config(self.state_dir, required=True)
 
+    def _migration_authority(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        config=config or self._config()
+        return migration_authority(self.state_dir,config=config)
+
+    @staticmethod
+    def _migration_message(authority: dict[str, Any]) -> str:
+        sources=authority.get("sources") or []
+        detail=", ".join(sources) if sources else "legacy authority handoff is unresolved"
+        return f"legacy OS automation definitions require migration: {detail}"
+
     def _claim_due(self, now: datetime) -> list[str]:
+        config=self._config()
+        if not config.get("enabled") or self._migration_authority(config)["required"]:
+            return []
         conn=connect(self.state_dir); claimed=[]; now_iso=iso(now)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -112,6 +126,9 @@ class Engine:
 
     def execute_run(self, run_id: str) -> dict[str, Any]:
         config=self._config()
+        migration=self._migration_authority(config)
+        if migration["required"]:
+            return self._terminal(run_id,"canceled","LEGACY_AUTHORITY_CONFLICT",self._migration_message(migration))
         if not config.get("enabled"):
             return self._terminal(run_id,"canceled","COMPONENT_DISABLED","Automations component is disabled")
         conn=connect(self.state_dir)
@@ -143,6 +160,15 @@ class Engine:
             return self._terminal(run_id,"blocked","OS_APPROVAL_REQUIRED",decision.get("reason") or "approval required")
         if decision["decision"]!="allow":
             return self._terminal(run_id,"blocked","OS_DENIED",decision.get("reason") or "denied")
+
+        # Re-read live authority immediately before the external delivery edge.
+        final_config=self._config()
+        final_migration=self._migration_authority(final_config)
+        if final_migration["required"]:
+            return self._terminal(run_id,"canceled","LEGACY_AUTHORITY_CONFLICT",self._migration_message(final_migration))
+        if not final_config.get("enabled"):
+            return self._terminal(run_id,"canceled","COMPONENT_DISABLED","Automations component is disabled")
+        config=final_config
 
         wake=json.loads(run["wake_json"])
         target_cfg=(config.get("targets") or {}).get(automation["target_kind"])
@@ -207,7 +233,7 @@ class Engine:
 
     def tick(self, *, now: datetime | None = None) -> list[dict[str,Any]]:
         now=now or datetime.now(timezone.utc); config=self._config()
-        if not config.get("enabled"): return []
+        if not config.get("enabled") or self._migration_authority(config)["required"]: return []
         self.recover_stale(now=now)
         claimed=self._claim_due(now)
         conn=connect(self.state_dir)
@@ -266,6 +292,9 @@ class Engine:
         return self.execute_run(run_id)
 
     def run_now(self, automation_id: str) -> dict[str,Any]:
+        migration=self._migration_authority()
+        if migration["required"]:
+            raise StateConflict(self._migration_message(migration))
         conn=connect(self.state_dir); now=utc_now()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -286,6 +315,9 @@ class Engine:
         return self.execute_run(run_id)
 
     def ingest_event(self, *, trigger_id: str, event_id: str, event: dict[str,Any], source_kind: str, source: str | None = None, event_type: str | None = None) -> dict[str,Any]:
+        migration=self._migration_authority()
+        if migration["required"]:
+            raise StateConflict(self._migration_message(migration))
         if not isinstance(event_id,str) or not event_id.strip() or len(event_id)>256 or "\x00" in event_id or "\n" in event_id or "\r" in event_id:
             raise ValidationError("event_id must be a bounded stable identifier")
         # Normalize and bound before hashing/persisting so event ingress cannot become an unbounded data store.
