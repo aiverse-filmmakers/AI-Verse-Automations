@@ -100,8 +100,9 @@ def test_tick_does_not_claim_or_advance_due_work_while_live_legacy_conflict_exis
     assert len(received)==1
 
 
-def test_claimed_run_is_canceled_if_legacy_conflict_appears_before_execute(
+def test_claimed_run_is_blocked_and_recoverable_if_legacy_conflict_appears_before_execute(
     state_dir: Path,
+    allow_os,
     owner_server,
 ):
     url,received,_=owner_server
@@ -114,10 +115,15 @@ def test_claimed_run_is_canceled_if_legacy_conflict_appears_before_execute(
     path.write_text("schedule: daily\n",encoding="utf-8")
 
     result=engine.execute_run(run_id)
-    assert result["status"]=="canceled"
+    assert result["status"]=="blocked"
     assert result["last_error_code"]=="LEGACY_AUTHORITY_CONFLICT"
     assert "post-setup-legacy.yaml" in result["last_error"]
     assert received==[]
+
+    path.unlink()
+    recovered=engine.retry_run(run_id)
+    assert recovered["status"]=="succeeded"
+    assert len(received)==1
 
 
 def test_final_delivery_edge_rechecks_live_legacy_authority(
@@ -139,7 +145,7 @@ def test_final_delivery_edge_rechecks_live_legacy_authority(
     monkeypatch.setattr("aiverse_automations.engine.os_permission",allow_then_inject)
     result=engine.execute_run(run_id)
 
-    assert result["status"]=="canceled"
+    assert result["status"]=="blocked"
     assert result["last_error_code"]=="LEGACY_AUTHORITY_CONFLICT"
     assert received==[]
 
