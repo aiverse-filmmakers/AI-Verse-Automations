@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -213,36 +214,211 @@ def _write_owned_file(root: Path, relative: str, content: str) -> bool:
     return True
 
 
-def _entry(existing: Any, state_dir: Path) -> dict[str, Any]:
+def _state_dir_digest(state_dir: Path) -> str:
+    return "sha256:" + hashlib.sha256(
+        str(state_dir.resolve()).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_owned_entry(existing: Any, state_dir: Path) -> dict[str, Any]:
+    if not isinstance(existing, dict):
+        raise OsExtensionError("existing Automations extension entry is invalid")
+    if (
+        existing.get("id") != EXTENSION_ID
+        or existing.get("source") != EXTENSION_SOURCE
+        or existing.get("state_dir_digest") != _state_dir_digest(state_dir)
+    ):
+        raise OsExtensionError("existing Automations extension entry is not owned by this component state")
+    if existing.get("installed") is not True or existing.get("supported") is not True:
+        raise OsExtensionError("existing Automations extension entry has invalid installed/supported state")
+    if not isinstance(existing.get("enabled"), bool):
+        raise OsExtensionError("existing Automations extension enabled state is invalid")
+    return dict(existing)
+
+
+def _entry(existing: Any, state_dir: Path, *, enabled: bool) -> dict[str, Any]:
     if existing is None:
         current: dict[str, Any] = {}
-    elif isinstance(existing, dict):
-        current = dict(existing)
-        if (
-            current.get("id") not in {None, EXTENSION_ID}
-            or current.get("source") not in {None, EXTENSION_SOURCE}
-        ):
-            raise OsExtensionError("existing Automations extension entry is not owned by this component")
     else:
-        raise OsExtensionError("existing Automations extension entry is invalid")
-    enabled = current.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise OsExtensionError("existing Automations extension enabled state is invalid")
+        current = _validate_owned_entry(existing, state_dir)
     return {
         **current,
         "id": EXTENSION_ID,
         "supported": True,
         "installed": True,
-        "enabled": enabled,
+        "enabled": bool(enabled),
         "version": __version__,
         "source": EXTENSION_SOURCE,
         "instructions": EXTENSION_INSTRUCTIONS,
         "engine": EXTENSION_ENGINE,
         "adapters": [],
-        "state_dir_digest": "sha256:" + hashlib.sha256(
-            str(state_dir.resolve()).encode("utf-8")
-        ).hexdigest(),
+        "state_dir_digest": _state_dir_digest(state_dir),
     }
+
+
+@contextmanager
+def _registry_lock(root: Path):
+    lock = _relative_path(root, REGISTRY_LOCK_PATH)
+    _assert_no_symlink_chain(root, REGISTRY_LOCK_PATH, include_leaf=True)
+    fd: int | None = None
+    acquired = False
+    try:
+        try:
+            fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            acquired = True
+            os.write(fd, json.dumps({
+                "extension_id": EXTENSION_ID,
+                "created_at": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ).isoformat(),
+            }).encode("utf-8"))
+            os.close(fd)
+            fd = None
+        except FileExistsError as exc:
+            raise OsExtensionError("OS extension registry is busy") from exc
+        yield
+
+
+def _owned_file_matches(root: Path, relative: str, expected: str) -> bool:
+    path = _relative_path(root, relative)
+    _assert_no_symlink_chain(root, relative, include_leaf=True)
+    if not path.exists():
+        return False
+    if path.is_symlink() or not path.is_file():
+        raise OsExtensionError(f"extension-owned file is unsafe: {relative}")
+    return path.read_text(encoding="utf-8") == expected
+
+
+def _validate_owned_files(root: Path, state_dir: Path) -> dict[str, bool]:
+    engine = _owned_file_matches(root, EXTENSION_ENGINE, _engine(state_dir))
+    instructions = _owned_file_matches(root, EXTENSION_INSTRUCTIONS, _instructions())
+    return {"engine": engine, "instructions": instructions}
+
+
+def inspect_os_extension(state_dir: Path, os_root: Path) -> dict[str, Any]:
+    state_dir = state_dir.expanduser().resolve()
+    os_root = os_root.expanduser().resolve()
+    document, _ = _read_registry(os_root)
+    existing = document["extensions"].get(EXTENSION_ID)
+    files = _validate_owned_files(os_root, state_dir)
+
+    if existing is None:
+        return {
+            "attached": False,
+            "enabled": None,
+            "installed": False,
+            "consistent": not any(files.values()),
+            "files": files,
+            "registry": REGISTRY_PATH,
+        }
+
+    entry = _validate_owned_entry(existing, state_dir)
+    config = load_config(state_dir, required=False)
+    expected_enabled = bool(config.get("enabled"))
+    return {
+        "attached": True,
+        "enabled": bool(entry["enabled"]),
+        "installed": True,
+        "consistent": (
+            bool(entry["enabled"]) == expected_enabled
+            and files["engine"]
+            and files["instructions"]
+        ),
+        "files": files,
+        "registry": REGISTRY_PATH,
+        "state_dir_digest": entry["state_dir_digest"],
+    }
+
+
+def sync_os_extension_enabled(state_dir: Path, os_root: Path, enabled: bool) -> dict[str, Any]:
+    state_dir = state_dir.expanduser().resolve()
+    os_root = os_root.expanduser().resolve()
+    with _registry_lock(os_root):
+        document, raw = _read_registry(os_root)
+        extensions = dict(document["extensions"])
+        existing = extensions.get(EXTENSION_ID)
+        if existing is None:
+            return {
+                "status": "detached",
+                "extension_id": EXTENSION_ID,
+                "enabled": None,
+                "registry_written": False,
+            }
+
+        entry = _validate_owned_entry(existing, state_dir)
+        files = _validate_owned_files(os_root, state_dir)
+        if not files["engine"] or not files["instructions"]:
+            raise OsExtensionError("attached Automations bridge files are missing or modified")
+
+        next_entry = {**entry, "enabled": bool(enabled), "version": __version__}
+        extensions[EXTENSION_ID] = next_entry
+        next_document = {**document, "extensions": extensions}
+        if next_document != document:
+            _write_registry(os_root, next_document, raw)
+            written = True
+        else:
+            written = False
+        return {
+            "status": "updated" if written else "unchanged",
+            "extension_id": EXTENSION_ID,
+            "enabled": bool(enabled),
+            "registry_written": written,
+        }
+
+
+def detach_os_extension(state_dir: Path, os_root: Path) -> dict[str, Any]:
+    state_dir = state_dir.expanduser().resolve()
+    os_root = os_root.expanduser().resolve()
+    removed_files: list[str] = []
+
+    with _registry_lock(os_root):
+        document, raw = _read_registry(os_root)
+        extensions = dict(document["extensions"])
+        existing = extensions.get(EXTENSION_ID)
+
+        files = _validate_owned_files(os_root, state_dir)
+        for relative, ok in (
+            (EXTENSION_ENGINE, files["engine"]),
+            (EXTENSION_INSTRUCTIONS, files["instructions"]),
+        ):
+            path = _relative_path(os_root, relative)
+            if path.exists() and not ok:
+                raise OsExtensionError(
+                    f"refusing to remove modified extension-owned file: {relative}"
+                )
+
+        registry_written = False
+        if existing is not None:
+            _validate_owned_entry(existing, state_dir)
+            del extensions[EXTENSION_ID]
+            next_document = {**document, "extensions": extensions}
+            _write_registry(os_root, next_document, raw)
+            registry_written = True
+
+        for relative, ok in (
+            (EXTENSION_ENGINE, files["engine"]),
+            (EXTENSION_INSTRUCTIONS, files["instructions"]),
+        ):
+            if not ok:
+                continue
+            path = _relative_path(os_root, relative)
+            path.unlink()
+            removed_files.append(relative)
+
+        extension_root = _relative_path(os_root, EXTENSION_ROOT)
+        if extension_root.exists() and extension_root.is_dir() and not extension_root.is_symlink():
+            try:
+                extension_root.rmdir()
+            except OSError:
+                pass
+
+        return {
+            "status": "detached" if existing is not None or removed_files else "unchanged",
+            "extension_id": EXTENSION_ID,
+            "registry_written": registry_written,
+            "removed_files": sorted(removed_files),
+            "preserved_state_dir": str(state_dir),
+        }
 
 
 def _write_registry(root: Path, document: dict[str, Any], expected_raw: str | None) -> None:
@@ -269,59 +445,47 @@ def install_os_extension(state_dir: Path, os_root: Path) -> dict[str, Any]:
     _require_bound_owner(state_dir, os_root)
     _ensure_extension_dir(os_root)
 
-    lock = _relative_path(os_root, REGISTRY_LOCK_PATH)
-    _assert_no_symlink_chain(os_root, REGISTRY_LOCK_PATH, include_leaf=True)
-    fd: int | None = None
-    acquired = False
+    config = load_config(state_dir, required=True)
     created: list[str] = []
     try:
-        try:
-            fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            acquired = True
-            os.write(fd, json.dumps({
+        with _registry_lock(os_root):
+            document, raw = _read_registry(os_root)
+            extensions = dict(document["extensions"])
+            next_entry = _entry(
+                extensions.get(EXTENSION_ID),
+                state_dir,
+                enabled=bool(config.get("enabled")),
+            )
+
+            if _write_owned_file(os_root, EXTENSION_INSTRUCTIONS, _instructions()):
+                created.append(EXTENSION_INSTRUCTIONS)
+            if _write_owned_file(os_root, EXTENSION_ENGINE, _engine(state_dir)):
+                created.append(EXTENSION_ENGINE)
+
+            extensions[EXTENSION_ID] = next_entry
+            next_document = {
+                **document,
+                "schema_version": REGISTRY_SCHEMA,
+                "extensions": extensions,
+            }
+            if document != next_document:
+                _write_registry(os_root, next_document, raw)
+                registry_written = True
+            else:
+                registry_written = False
+
+            return {
+                "status": "installed" if created or registry_written else "unchanged",
                 "extension_id": EXTENSION_ID,
-                "created_at": __import__("datetime").datetime.now(
-                    __import__("datetime").timezone.utc
-                ).isoformat(),
-            }).encode("utf-8"))
-            os.close(fd)
-            fd = None
-        except FileExistsError as exc:
-            raise OsExtensionError("OS extension registry is busy") from exc
-
-        document, raw = _read_registry(os_root)
-        extensions = dict(document["extensions"])
-        next_entry = _entry(extensions.get(EXTENSION_ID), state_dir)
-
-        if _write_owned_file(os_root, EXTENSION_INSTRUCTIONS, _instructions()):
-            created.append(EXTENSION_INSTRUCTIONS)
-        if _write_owned_file(os_root, EXTENSION_ENGINE, _engine(state_dir)):
-            created.append(EXTENSION_ENGINE)
-
-        extensions[EXTENSION_ID] = next_entry
-        next_document = {
-            **document,
-            "schema_version": REGISTRY_SCHEMA,
-            "extensions": extensions,
-        }
-        if document != next_document:
-            _write_registry(os_root, next_document, raw)
-            registry_written = True
-        else:
-            registry_written = False
-
-        return {
-            "status": "installed" if created or registry_written else "unchanged",
-            "extension_id": EXTENSION_ID,
-            "version": __version__,
-            "engine": EXTENSION_ENGINE,
-            "instructions": EXTENSION_INSTRUCTIONS,
-            "registry": REGISTRY_PATH,
-            "registry_written": registry_written,
-            "materialized_files": sorted(created),
-            "state_dir_digest": next_entry["state_dir_digest"],
-            "tracked_os_files_mutated": [],
-        }
+                "version": __version__,
+                "engine": EXTENSION_ENGINE,
+                "instructions": EXTENSION_INSTRUCTIONS,
+                "registry": REGISTRY_PATH,
+                "registry_written": registry_written,
+                "materialized_files": sorted(created),
+                "state_dir_digest": next_entry["state_dir_digest"],
+                "tracked_os_files_mutated": [],
+            }
     except Exception:
         for relative in reversed(created):
             try:
