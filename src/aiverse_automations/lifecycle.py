@@ -124,15 +124,18 @@ def doctor(state_dir: Path) -> dict:
     checks.append({"depth":"structural","name":"config","ok":config_path(state_dir).is_file(),"detail":str(config_path(state_dir))})
     if db_path(state_dir).exists():
         ok,detail=integrity_check(state_dir); checks.append({"depth":"runtime","name":"sqlite-integrity","ok":ok,"detail":detail})
-        conn=connect(state_dir)
-        try:
-            overdue=conn.execute("SELECT COUNT(*) FROM triggers WHERE state='active' AND next_run_at IS NOT NULL AND next_run_at<?",(utc_now(),)).fetchone()[0]
-            stale=conn.execute("SELECT COUNT(*) FROM runs WHERE status IN ('claimed','authorizing','delivering')").fetchone()[0]
-            dead=conn.execute("SELECT COUNT(*) FROM runs WHERE status IN ('dead_letter','unknown')").fetchone()[0]
-        finally: conn.close()
-        checks.append({"depth":"operational","name":"overdue-triggers","ok":True,"detail":int(overdue)})
-        checks.append({"depth":"operational","name":"nonterminal-runs","ok":True,"detail":int(stale)})
-        checks.append({"depth":"operational","name":"recovery-attention","ok":True,"detail":int(dead)})
+        if ok:
+            conn=connect(state_dir)
+            try:
+                overdue=conn.execute("SELECT COUNT(*) FROM triggers WHERE state='active' AND next_run_at IS NOT NULL AND next_run_at<?",(utc_now(),)).fetchone()[0]
+                stale=conn.execute("SELECT COUNT(*) FROM runs WHERE status IN ('claimed','authorizing','delivering')").fetchone()[0]
+                dead=conn.execute("SELECT COUNT(*) FROM runs WHERE status IN ('dead_letter','unknown')").fetchone()[0]
+            finally: conn.close()
+            checks.append({"depth":"operational","name":"overdue-triggers","ok":True,"detail":int(overdue)})
+            checks.append({"depth":"operational","name":"nonterminal-runs","ok":True,"detail":int(stale)})
+            checks.append({"depth":"operational","name":"recovery-attention","ok":True,"detail":int(dead)})
+        else:
+            checks.append({"depth":"operational","name":"store-operational","ok":False,"detail":"skipped because canonical store identity/schema is invalid"})
     else:
         checks.append({"depth":"runtime","name":"sqlite-integrity","ok":False,"detail":"database missing"})
     os_root=config.get("os_root")
