@@ -7,10 +7,11 @@ import sys
 
 import pytest
 
-from aiverse_automations.lifecycle import setup
+from aiverse_automations.lifecycle import descriptor, doctor, set_enabled, setup, uninstall
 from aiverse_automations.os_extension import (
     EXTENSION_ENGINE,
     EXTENSION_ID,
+    EXTENSION_INSTRUCTIONS,
     REGISTRY_LOCK_PATH,
     REGISTRY_PATH,
     OsExtensionError,
@@ -127,7 +128,7 @@ def test_os_extension_never_steals_existing_registry_lock(tmp_path: Path):
     assert not (root/EXTENSION_ENGINE).exists()
 
 
-def test_os_extension_preserves_explicit_disabled_registration(tmp_path: Path):
+def test_os_extension_attachment_reconciles_to_component_enabled_truth(tmp_path: Path):
     root=_full_os(tmp_path)
     state=tmp_path/"automations-state"
     setup(state,os_root=str(root),enable=True)
@@ -138,6 +139,100 @@ def test_os_extension_preserves_explicit_disabled_registration(tmp_path: Path):
     doc["extensions"][EXTENSION_ID]["enabled"]=False
     (root/REGISTRY_PATH).write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
 
+    assert descriptor(state)["state"]=="unhealthy"
+    assert descriptor(state)["attachment"]["consistent"] is False
+
     second=install_os_extension(state,root)
-    assert second["status"]=="unchanged"
+    assert second["status"]=="installed"
+    assert _registry(root)["extensions"][EXTENSION_ID]["enabled"] is True
+    assert descriptor(state)["state"]=="ready"
+
+
+
+def test_attached_enable_disable_uninstall_and_reinstall_stay_synchronized(tmp_path: Path):
+    root=_full_os(tmp_path)
+    state=tmp_path/"automations-state"
+    setup(state,os_root=str(root),enable=True)
+    install_os_extension(state,root)
+
+    assert descriptor(state)["state"]=="ready"
+    assert descriptor(state)["attachment"]["attached"] is True
+    assert _registry(root)["extensions"][EXTENSION_ID]["enabled"] is True
+
+    disabled=set_enabled(state,False)
+    assert disabled["state"]=="disabled"
+    assert disabled["attachment"]["attached"] is True
+    assert disabled["attachment"]["enabled"] is False
+    assert disabled["attachment"]["consistent"] is True
     assert _registry(root)["extensions"][EXTENSION_ID]["enabled"] is False
+
+    enabled=set_enabled(state,True)
+    assert enabled["state"]=="ready"
+    assert enabled["attachment"]["enabled"] is True
+    assert enabled["attachment"]["consistent"] is True
+    assert _registry(root)["extensions"][EXTENSION_ID]["enabled"] is True
+
+    database=Path(descriptor(state)["database"])
+    assert database.is_file()
+    result=uninstall(state)
+    assert result["state"]=="setup-required"
+    assert result["uninstall_preserves_canonical_state"] is True
+    assert database.is_file()
+    assert EXTENSION_ID not in _registry(root)["extensions"]
+    assert not (root/EXTENSION_ENGINE).exists()
+    assert not (root/EXTENSION_INSTRUCTIONS).exists()
+    assert result["detached_extension"]["status"]=="detached"
+
+    setup_result=setup(state,os_root=str(root),enable=True)
+    assert setup_result["state"]=="ready"
+    assert setup_result["attachment"]["attached"] is False
+    reattached=install_os_extension(state,root)
+    assert reattached["status"]=="installed"
+    assert _registry(root)["extensions"][EXTENSION_ID]["enabled"] is True
+    assert (root/EXTENSION_ENGINE).is_file()
+    assert (root/EXTENSION_INSTRUCTIONS).is_file()
+    assert descriptor(state)["attachment"]["consistent"] is True
+
+
+def test_lifecycle_rolls_back_component_state_if_registry_lock_is_busy(tmp_path: Path):
+    root=_full_os(tmp_path)
+    state=tmp_path/"automations-state"
+    setup(state,os_root=str(root),enable=True)
+    install_os_extension(state,root)
+
+    lock=root/REGISTRY_LOCK_PATH
+    lock.write_text("owned-by-other-installer\n",encoding="utf-8")
+    try:
+        with pytest.raises(OsExtensionError,match="registry is busy"):
+            set_enabled(state,False)
+    finally:
+        lock.unlink()
+
+    status=descriptor(state)
+    assert status["state"]=="ready"
+    assert status["enabled"] is True
+    assert status["attachment"]["enabled"] is True
+    assert status["attachment"]["consistent"] is True
+
+
+def test_doctor_exposes_manual_attachment_lifecycle_divergence(tmp_path: Path):
+    root=_full_os(tmp_path)
+    state=tmp_path/"automations-state"
+    setup(state,os_root=str(root),enable=True)
+    install_os_extension(state,root)
+
+    doc=_registry(root)
+    doc["extensions"][EXTENSION_ID]["enabled"]=False
+    (root/REGISTRY_PATH).write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
+
+    status=descriptor(state)
+    assert status["state"]=="unhealthy"
+    assert status["attachment"]["consistent"] is False
+
+    diagnosis=doctor(state)
+    assert diagnosis["state"]=="unhealthy"
+    assert diagnosis["ok"] is False
+    check=next(c for c in diagnosis["checks"] if c["name"]=="os-extension-attachment")
+    assert check["ok"] is False
+    assert check["detail"]["attached"] is True
+    assert check["detail"]["enabled"] is False
