@@ -128,7 +128,7 @@ class Engine:
         config=self._config()
         migration=self._migration_authority(config)
         if migration["required"]:
-            return self._terminal(run_id,"canceled","LEGACY_AUTHORITY_CONFLICT",self._migration_message(migration))
+            return self._terminal(run_id,"blocked","LEGACY_AUTHORITY_CONFLICT",self._migration_message(migration))
         if not config.get("enabled"):
             return self._terminal(run_id,"canceled","COMPONENT_DISABLED","Automations component is disabled")
         conn=connect(self.state_dir)
@@ -165,7 +165,7 @@ class Engine:
         final_config=self._config()
         final_migration=self._migration_authority(final_config)
         if final_migration["required"]:
-            return self._terminal(run_id,"canceled","LEGACY_AUTHORITY_CONFLICT",self._migration_message(final_migration))
+            return self._terminal(run_id,"blocked","LEGACY_AUTHORITY_CONFLICT",self._migration_message(final_migration))
         if not final_config.get("enabled"):
             return self._terminal(run_id,"canceled","COMPONENT_DISABLED","Automations component is disabled")
         config=final_config
