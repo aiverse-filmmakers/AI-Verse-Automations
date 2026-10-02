@@ -277,6 +277,14 @@ def _registry_lock(root: Path):
         except FileExistsError as exc:
             raise OsExtensionError("OS extension registry is busy") from exc
         yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if acquired:
+            try:
+                lock.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _owned_file_matches(root: Path, relative: str, expected: str) -> bool:
