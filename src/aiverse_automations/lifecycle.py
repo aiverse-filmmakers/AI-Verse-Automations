@@ -84,7 +84,28 @@ def _sync_attachment_enabled(state_dir: Path, config: dict, enabled: bool) -> di
     os_root=config.get("os_root")
     if not isinstance(os_root,str) or not os_root:
         return {"status":"detached","enabled":None,"registry_written":False}
+    attachment=attachment_authority(state_dir,config=config)
+    if attachment.get("attached") is False and attachment.get("consistent") is True:
+        return {"status":"detached","enabled":None,"registry_written":False}
+    if attachment.get("attached") is not True:
+        raise ValidationError(
+            "OS extension attachment is inconsistent and cannot be synchronized safely"
+        )
     return sync_os_extension_enabled(state_dir,Path(os_root),enabled)
+
+
+def _detach_attachment(state_dir: Path, config: dict) -> dict:
+    os_root=config.get("os_root")
+    if not isinstance(os_root,str) or not os_root:
+        return {"status":"unchanged","registry_written":False,"removed_files":[]}
+    attachment=attachment_authority(state_dir,config=config)
+    if attachment.get("attached") is False and attachment.get("consistent") is True:
+        return {"status":"unchanged","registry_written":False,"removed_files":[]}
+    if attachment.get("attached") not in {True,False}:
+        raise ValidationError(
+            "OS extension attachment is inconsistent and cannot be detached safely"
+        )
+    return detach_os_extension(state_dir,Path(os_root))
 
 
 def descriptor(state_dir: Path) -> dict:
@@ -190,11 +211,9 @@ def uninstall(state_dir: Path) -> dict:
     previous=dict(config)
     config["enabled"]=False
     save_config(state_dir,config)
-    detach={"status":"detached","registry_written":False,"removed_files":[]}
+    detach={"status":"unchanged","registry_written":False,"removed_files":[]}
     try:
-        os_root=config.get("os_root")
-        if isinstance(os_root,str) and os_root:
-            detach=detach_os_extension(state_dir,Path(os_root))
+        detach=_detach_attachment(state_dir,config)
     except Exception:
         save_config(state_dir,previous)
         raise
