@@ -140,7 +140,7 @@ def uninstall(state_dir: Path) -> dict:
 
 
 def doctor(state_dir: Path) -> dict:
-    checks=[]; config=load_config(state_dir,required=False)
+    checks=[]; config=load_config(state_dir,required=False); status=descriptor(state_dir)
     checks.append({"depth":"structural","name":"config","ok":config_path(state_dir).is_file(),"detail":str(config_path(state_dir))})
     if db_path(state_dir).exists():
         ok,detail=integrity_check(state_dir); checks.append({"depth":"runtime","name":"sqlite-integrity","ok":ok,"detail":detail})
@@ -161,7 +161,11 @@ def doctor(state_dir: Path) -> dict:
     os_root=config.get("os_root")
     permission=_permission_boundary(os_root)
     checks.append({"depth":"dependency","name":"os-permission-boundary","ok":_os_dependency_ok(os_root),"detail":str(permission) if permission else "os_root not configured"})
-    migration=migration_authority(state_dir,config=config)
+    migration={
+      "required":status["migration_required"],
+      "configured":status["migration_sources_configured"],
+      "discovered":status["migration_sources_discovered"],
+    }
     checks.append({"depth":"attachment/discovery","name":"legacy-definition-handoff","ok":not migration["required"],"detail":{"configured":migration["configured"],"discovered":migration["discovered"]}})
     critical={"config","sqlite-integrity","os-permission-boundary","legacy-definition-handoff"}
-    return {"component_id":COMPONENT_ID,"version":__version__,"checked_depths":["structural","attachment/discovery","runtime","dependency","operational"],"ok":all(c["ok"] for c in checks if c["name"] in critical),"checks":checks,"state":descriptor(state_dir)["state"]}
+    return {"component_id":COMPONENT_ID,"version":__version__,"checked_depths":["structural","attachment/discovery","runtime","dependency","operational"],"ok":all(c["ok"] for c in checks if c["name"] in critical),"checks":checks,"state":status["state"]}
