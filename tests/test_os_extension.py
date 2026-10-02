@@ -236,3 +236,57 @@ def test_doctor_exposes_manual_attachment_lifecycle_divergence(tmp_path: Path):
     assert check["ok"] is False
     assert check["detail"]["attached"] is True
     assert check["detail"]["enabled"] is False
+
+
+
+def test_lifecycle_sync_preserves_unrelated_registry_entries(tmp_path: Path):
+    root=_full_os(tmp_path)
+    state=tmp_path/"automations-state"
+    setup(state,os_root=str(root),enable=True)
+
+    registry=root/REGISTRY_PATH
+    registry.parent.mkdir(parents=True,exist_ok=True)
+    registry.write_text(json.dumps({
+        "schema_version":"1.0",
+        "custom_top_level":{"keep":True},
+        "extensions":{"other":{"id":"other","enabled":True,"custom":"preserve"}},
+    },indent=2)+"\n",encoding="utf-8")
+
+    install_os_extension(state,root)
+    set_enabled(state,False)
+    mid=_registry(root)
+    assert mid["custom_top_level"]=={"keep":True}
+    assert mid["extensions"]["other"]=={"id":"other","enabled":True,"custom":"preserve"}
+    assert mid["extensions"][EXTENSION_ID]["enabled"] is False
+
+    uninstall(state)
+    final=_registry(root)
+    assert final["custom_top_level"]=={"keep":True}
+    assert final["extensions"]=={
+        "other":{"id":"other","enabled":True,"custom":"preserve"}
+    }
+
+
+def test_uninstall_rolls_back_component_disable_when_registry_lock_is_busy(tmp_path: Path):
+    root=_full_os(tmp_path)
+    state=tmp_path/"automations-state"
+    setup(state,os_root=str(root),enable=True)
+    install_os_extension(state,root)
+
+    database=Path(descriptor(state)["database"])
+    lock=root/REGISTRY_LOCK_PATH
+    lock.write_text("owned-by-other-installer\n",encoding="utf-8")
+    try:
+        with pytest.raises(OsExtensionError,match="registry is busy"):
+            uninstall(state)
+    finally:
+        lock.unlink()
+
+    status=descriptor(state)
+    assert status["state"]=="ready"
+    assert status["enabled"] is True
+    assert status["attachment"]["attached"] is True
+    assert status["attachment"]["enabled"] is True
+    assert database.is_file()
+    assert (root/EXTENSION_ENGINE).is_file()
+    assert (root/EXTENSION_INSTRUCTIONS).is_file()
